@@ -71,7 +71,7 @@ func NewTXTRegistry(provider provider.Provider, txtPrefix, txtSuffix, ownerID st
 }
 
 func getSupportedTypes() []string {
-	return []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS}
+	return []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS, endpoint.RecordTypeTXT}
 }
 
 func (im *TXTRegistry) GetDomainFilter() endpoint.DomainFilterInterface {
