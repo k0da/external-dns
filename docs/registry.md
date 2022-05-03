@@ -11,4 +11,4 @@ In order to maintain compatibility, both records will be maintained for some tim
 
 Later on, the old format will be dropped and only the new format will be kept (<record_type>-<endpoint_name>).
 
-Cleanup will be done by controller itself.
+On next record reconcile controller will drop `old` record format and keep creating only new format.
