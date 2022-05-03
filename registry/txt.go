@@ -150,7 +150,7 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 // Once we decide to drop old format we need to drop toTXTName() and rename toNewTXTName
 func (im *TXTRegistry) generateTXTRecord(r *endpoint.Endpoint) *endpoint.Endpoint {
 	// new TXT record format (containing record type)
-	txtNew := endpoint.NewEndpoint(im.mapper.toNewTXTName(r.DNSName, r.RecordType), endpoint.RecordTypeTXT, r.Labels.Serialize(true)).WithSetIdentifier(r.SetIdentifier)
+	txtNew := endpoint.NewEndpoint(im.mapper.toTXTName(r.DNSName, r.RecordType), endpoint.RecordTypeTXT, r.Labels.Serialize(true)).WithSetIdentifier(r.SetIdentifier)
 	txtNew.ProviderSpecific = r.ProviderSpecific
 
 	return txtNew
@@ -179,14 +179,10 @@ func (im *TXTRegistry) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 	}
 
 	for _, r := range filteredChanges.Delete {
-		// drop old TXT record format
-		oldTxt := endpoint.NewEndpoint(im.mapper.toTXTName(r.DNSName), endpoint.RecordTypeTXT, r.Labels.Serialize(true)).WithSetIdentifier(r.SetIdentifier)
-		oldTxt.ProviderSpecific = r.ProviderSpecific
 		// when we delete TXT records for which value has changed (due to new label) this would still work because
 		// !!! TXT record value is uniquely generated from the Labels of the endpoint. Hence old TXT record can be uniquely reconstructed
 		// !!! After migration to the new TXT registry format we can drop records in old format here!!!
 		filteredChanges.Delete = append(filteredChanges.Delete, im.generateTXTRecord(r))
-		filteredChanges.Delete = append(filteredChanges.Delete, oldTxt)
 
 		if im.cacheInterval > 0 {
 			im.removeFromCache(r)
@@ -241,8 +237,7 @@ func (im *TXTRegistry) AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endpoi
 
 type nameMapper interface {
 	toEndpointName(string) string
-	toTXTName(string) string
-	toNewTXTName(string, string) string
+	toTXTName(string, string) string
 }
 
 type affixNameMapper struct {
@@ -322,22 +317,6 @@ func (pr affixNameMapper) toEndpointName(txtDNSName string) string {
 	return ""
 }
 
-func (pr affixNameMapper) toTXTName(endpointDNSName string) string {
-	DNSName := strings.SplitN(endpointDNSName, ".", 2)
-
-	prefix := pr.dropAffixTemplate(pr.prefix)
-	suffix := pr.dropAffixTemplate(pr.suffix)
-	// If specified, replace a leading asterisk in the generated txt record name with some other string
-	if pr.wildcardReplacement != "" && DNSName[0] == "*" {
-		DNSName[0] = pr.wildcardReplacement
-	}
-
-	if len(DNSName) < 2 {
-		return prefix + DNSName[0] + suffix
-	}
-	return prefix + DNSName[0] + suffix + "." + DNSName[1]
-}
-
 func (pr affixNameMapper) recordTypeInAffix() bool {
 	if strings.Contains(pr.prefix, recordTemplate) {
 		return true
@@ -354,7 +333,7 @@ func (pr affixNameMapper) normalizeAffixTemplate(afix, recordType string) string
 	}
 	return afix
 }
-func (pr affixNameMapper) toNewTXTName(endpointDNSName, recordType string) string {
+func (pr affixNameMapper) toTXTName(endpointDNSName, recordType string) string {
 	DNSName := strings.SplitN(endpointDNSName, ".", 2)
 	recordType = strings.ToLower(recordType)
 	recordT := recordType + "-"
