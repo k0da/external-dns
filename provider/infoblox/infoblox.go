@@ -29,6 +29,7 @@ import (
 	"github.com/StackExchange/dnscontrol/v3/pkg/transform"
 	ibclient "github.com/infobloxopen/infoblox-go-client/v2"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/appengine/log"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
@@ -38,6 +39,9 @@ import (
 const (
 	// provider specific key to track if PTR record was already created or not for A records
 	providerSpecificInfobloxPtrRecord = "infoblox-ptr-record-exists"
+	infobloxCreate                    = "CREATE"
+	infobloxDelete                    = "DELETE"
+	infobloxUpdate                    = "UPDATE"
 )
 
 func isNotFoundError(err error) bool {
@@ -183,18 +187,6 @@ func NewInfobloxProvider(ibStartupCfg StartupConfig) (*ProviderConfig, error) {
 	return providerCfg, nil
 }
 
-func recordQueryParams(zone string, view string) *ibclient.QueryParams {
-	searchFields := map[string]string{}
-	if zone != "" {
-		searchFields["zone"] = zone
-	}
-
-	if view != "" {
-		searchFields["view"] = view
-	}
-	return ibclient.NewQueryParams(false, searchFields)
-}
-
 // Records gets the current records.
 func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.Endpoint, err error) {
 	zones, err := p.zones()
@@ -204,9 +196,23 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 
 	for _, zone := range zones {
 		logrus.Debugf("fetch records from zone '%s'", zone.Fqdn)
-		searchParams := recordQueryParams(zone.Fqdn, p.view)
+
+		view := p.view
+		if view == "" {
+			view = "default"
+		}
+		searchParams := ibclient.NewQueryParams(
+			false,
+			map[string]string{
+				"zone": zone.Fqdn,
+				"view": view,
+			},
+		)
+
 		var resA []ibclient.RecordA
 		objA := ibclient.NewEmptyRecordA()
+		objA.View = p.view
+		objA.Zone = zone.Fqdn
 		err = p.client.GetObject(objA, "", searchParams, &resA)
 		if err != nil && !isNotFoundError(err) {
 			return nil, fmt.Errorf("could not fetch A records from zone '%s': %w", zone.Fqdn, err)
@@ -251,6 +257,8 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 		// Include Host records since they should be treated synonymously with A records
 		var resH []ibclient.HostRecord
 		objH := ibclient.NewEmptyHostRecord()
+		objH.View = p.view
+		objH.Zone = zone.Fqdn
 		err = p.client.GetObject(objH, "", searchParams, &resH)
 		if err != nil && !isNotFoundError(err) {
 			return nil, fmt.Errorf("could not fetch host records from zone '%s': %w", zone.Fqdn, err)
@@ -271,6 +279,8 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 
 		var resC []ibclient.RecordCNAME
 		objC := ibclient.NewEmptyRecordCNAME()
+		objC.View = p.view
+		objC.Zone = zone.Fqdn
 		err = p.client.GetObject(objC, "", searchParams, &resC)
 		if err != nil && !isNotFoundError(err) {
 			return nil, fmt.Errorf("could not fetch CNAME records from zone '%s': %w", zone.Fqdn, err)
@@ -288,7 +298,9 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 			if err == nil {
 				var resP []ibclient.RecordPTR
 				objP := ibclient.NewEmptyRecordPTR()
-				err = p.client.GetObject(objP, "", recordQueryParams(arpaZone, p.view), &resP)
+				objP.Zone = arpaZone
+				objP.View = p.view
+				err = p.client.GetObject(objP, "", searchParams, &resP)
 				if err != nil && !isNotFoundError(err) {
 					return nil, fmt.Errorf("could not fetch PTR records from zone '%s': %w", zone.Fqdn, err)
 				}
@@ -299,7 +311,12 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 		}
 
 		var resT []ibclient.RecordTXT
-		objT := ibclient.NewEmptyRecordTXT()
+		objT := ibclient.NewRecordTXT(
+			ibclient.RecordTXT{
+				Zone: zone.Fqdn,
+				View: p.view,
+			},
+		)
 		err = p.client.GetObject(objT, "", searchParams, &resT)
 		if err != nil && !isNotFoundError(err) {
 			return nil, fmt.Errorf("could not fetch TXT records from zone '%s': %w", zone.Fqdn, err)
@@ -376,14 +393,14 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 	return endpoints, nil
 }
 
-func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
+func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endpoint.Endpoint {
 	// Update user specified TTL (0 == disabled)
 	for i := range endpoints {
 		endpoints[i].RecordTTL = endpoint.TTL(p.cacheDuration)
 	}
 
 	if !p.createPTR {
-		return endpoints, nil
+		return endpoints
 	}
 
 	// for all A records, we want to create PTR records
@@ -403,27 +420,64 @@ func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*end
 		}
 	}
 
-	return endpoints, nil
+	return endpoints
+}
+
+func newIBChanges(action string, endpoints []*endpoint.Endpoint) []*infobloxChangeMap {
+	changes := make([]*infobloxChangeMap, 0, len(endpoints))
+
+	for _, endpoint := range endpoints {
+		changes = append(changes, &infobloxChangeMap{
+			Action:   action,
+			Endpoint: endpoint,
+		},
+		)
+	}
+
+	return changes
+}
+
+// submitChanges sends changes to Infoblox
+func (p *ProviderConfig) submitChanges(zones []ibclient.ZoneAuth, changes []*infobloxChangeMap) error {
+	// return early if there is nothing to change
+	if len(changes) == 0 {
+		return nil
+	}
+	changesByZone := ChangesByZone(zones, changes)
+	for zoneName, changes := range changesByZone {
+		for _, change := range changes {
+			record := p.recordSet(change, )
+			if p.dryRun {
+				continue
+			}
+			switch change.Action {
+			case infobloxCreate: http.ResponseWriter, r *http.Request
+			case infobloxDelete:
+			case infobloxUpdate:
+
+		}
+	}
 }
 
 // ApplyChanges applies the given changes.
 func (p *ProviderConfig) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	zones, err := p.zones()
-	if err != nil {
-		return err
-	}
+	combinedChanges := make([]*infobloxChangeMap, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
 
-	created, deleted := p.mapChanges(zones, changes)
-	p.deleteRecords(deleted)
-	p.createRecords(created)
-	return nil
+	combinedChanges = append(combinedChanges, newIBChanges(infobloxCreate, changes.Create)...)
+	combinedChanges = append(combinedChanges, newIBChanges(infobloxUpdate, changes.UpdateNew)...)
+	combinedChanges = append(combinedChanges, newIBChanges(infobloxDelete, changes.Delete)...)
+
+	return p.submitChanges(combinedChanges)
 }
 
 func (p *ProviderConfig) zones() ([]ibclient.ZoneAuth, error) {
 	var res, result []ibclient.ZoneAuth
-	obj := ibclient.NewZoneAuth(ibclient.ZoneAuth{})
-	queryParams := recordQueryParams("", p.view)
-	err := p.client.GetObject(obj, "", queryParams, &res)
+	obj := ibclient.NewZoneAuth(
+		ibclient.ZoneAuth{
+			View: p.view,
+		},
+	)
+	err := p.client.GetObject(obj, "", nil, &res)
 	if err != nil && !isNotFoundError(err) {
 		return nil, err
 	}
@@ -443,47 +497,25 @@ func (p *ProviderConfig) zones() ([]ibclient.ZoneAuth, error) {
 	return result, nil
 }
 
-type infobloxChangeMap map[string][]*endpoint.Endpoint
+type infobloxChangeMap struct {
+	Action   string
+	Endpoint *endpoint.Endpoint
+}
 
-func (p *ProviderConfig) mapChanges(zones []ibclient.ZoneAuth, changes *plan.Changes) (infobloxChangeMap, infobloxChangeMap) {
-	created := infobloxChangeMap{}
-	deleted := infobloxChangeMap{}
-
-	mapChange := func(changeMap infobloxChangeMap, change *endpoint.Endpoint) {
-		zone := p.findZone(zones, change.DNSName)
-		if zone == nil {
+func ChangesByZone(zones []*ibclient.ZoneAuth, changeSets []*infobloxChangeMap) map[string][]*infobloxChangeMap {
+	changes := make(map[string][]*infobloxChangeMap{})
+	for _, z := range zones {
+		changes[z.Zone] = []*infobloxChangeMap{}
+	}
+	for _, c := range changeSets {
+		zone, _ := p.findZone(zones, c.Endpoint.DNSName)
+		if zone == nil (
 			logrus.Debugf("Ignoring changes to '%s' because a suitable Infoblox DNS zone was not found.", change.DNSName)
-			return
-		}
-		// Ensure the record type is suitable
-		changeMap[zone.Fqdn] = append(changeMap[zone.Fqdn], change)
-
-		if p.createPTR && change.RecordType == endpoint.RecordTypeA {
-			reverseZone := p.findReverseZone(zones, change.Targets[0])
-			if reverseZone == nil {
-				logrus.Debugf("Ignoring changes to '%s' because a suitable Infoblox DNS reverse zone was not found.", change.Targets[0])
-				return
-			}
-			changecopy := *change
-			changecopy.RecordType = endpoint.RecordTypePTR
-			changeMap[reverseZone.Fqdn] = append(changeMap[reverseZone.Fqdn], &changecopy)
-		}
+			continue	
+		)
+		changes[zone] = append(changes[zone], c)
 	}
-
-	for _, change := range changes.Delete {
-		mapChange(deleted, change)
-	}
-	for _, change := range changes.UpdateOld {
-		mapChange(deleted, change)
-	}
-	for _, change := range changes.Create {
-		mapChange(created, change)
-	}
-	for _, change := range changes.UpdateNew {
-		mapChange(created, change)
-	}
-
-	return created, deleted
+	return changes
 }
 
 func (p *ProviderConfig) findZone(zones []ibclient.ZoneAuth, name string) *ibclient.ZoneAuth {
@@ -527,7 +559,7 @@ func (p *ProviderConfig) findReverseZone(zones []ibclient.ZoneAuth, name string)
 	return networks[maxMask]
 }
 
-func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool, targetIndex int) (recordSet infobloxRecordSet, err error) {
+func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recordSet infobloxRecordSet, err error) {
 	switch ep.RecordType {
 	case endpoint.RecordTypeA:
 		var res []ibclient.RecordA
@@ -587,10 +619,13 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool, target
 		if target, err2 := strconv.Unquote(ep.Targets[0]); err2 == nil && !strings.Contains(ep.Targets[0], " ") {
 			ep.Targets = endpoint.Targets{target}
 		}
-		obj := ibclient.NewEmptyRecordTXT()
-		obj.Name = ep.DNSName
-		obj.Text = ep.Targets[0]
-		obj.View = p.view
+		obj := ibclient.NewRecordTXT(
+			ibclient.RecordTXT{
+				Name: ep.DNSName,
+				Text: ep.Targets[0],
+				View: p.view,
+			},
+		)
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -606,6 +641,19 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool, target
 	return
 }
 
+func (p *ProviderConfig) buildRecord(zoneName string, change *infobloxChangeMap) (*infobloxRecordSet, error) {
+	rs, err := p.recordSet(change.Endpoint, false, ta)
+}
+
+func (p *ProviderConfig) submitChanges(changes infobloxChangeMap) error {
+	if len(changes) == 0 {
+		return nil
+	}
+
+}
+func (p *ProviderConfig) buildRecord(zone string, change infobloxChangeMap) interface{} {
+
+}
 func (p *ProviderConfig) createRecords(created infobloxChangeMap) {
 	for zone, endpoints := range created {
 		for _, ep := range endpoints {
