@@ -311,12 +311,10 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 		}
 
 		var resT []ibclient.RecordTXT
-		objT := ibclient.NewRecordTXT(
-			ibclient.RecordTXT{
-				Zone: zone.Fqdn,
-				View: p.view,
-			},
-		)
+		objT := &ibclient.RecordTXT{
+			Zone: zone.Fqdn,
+			View: p.view,
+		}
 		err = p.client.GetObject(objT, "", searchParams, &resT)
 		if err != nil && !isNotFoundError(err) {
 			return nil, fmt.Errorf("could not fetch TXT records from zone '%s': %w", zone.Fqdn, err)
@@ -423,11 +421,11 @@ func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endp
 	return endpoints
 }
 
-func newIBChanges(action string, endpoints []*endpoint.Endpoint) []*infobloxChangeMap {
-	changes := make([]*infobloxChangeMap, 0, len(endpoints))
+func newIBChanges(action string, endpoints []*endpoint.Endpoint) []*infobloxChange {
+	changes := make([]*infobloxChange, 0, len(endpoints))
 
 	for _, endpoint := range endpoints {
-		changes = append(changes, &infobloxChangeMap{
+		changes = append(changes, &infobloxChange{
 			Action:   action,
 			Endpoint: endpoint,
 		},
@@ -437,31 +435,48 @@ func newIBChanges(action string, endpoints []*endpoint.Endpoint) []*infobloxChan
 	return changes
 }
 
+func zonePointerConverter(in []ibclient.ZoneAuth) []*ibclient.ZoneAuth {
+	out := make([]*ibclient.ZoneAuth, len(in))
+	for i := range in {
+		out[i] = &in[i]
+	}
+	return out
+}
+
 // submitChanges sends changes to Infoblox
-func (p *ProviderConfig) submitChanges(zones []ibclient.ZoneAuth, changes []*infobloxChangeMap) error {
+func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 	// return early if there is nothing to change
 	if len(changes) == 0 {
 		return nil
 	}
-	changesByZone := ChangesByZone(zones, changes)
-	for zoneName, changes := range changesByZone {
-		for _, change := range changes {
-			record := p.recordSet(change, )
-			if p.dryRun {
-				continue
-			}
-			switch change.Action {
-			case infobloxCreate: http.ResponseWriter, r *http.Request
-			case infobloxDelete:
-			case infobloxUpdate:
 
+	zones, err := p.zones()
+	if err != nil {
+		return fmt.Errorf("could not fetch zones: %w", err)
+	}
+
+	changesByZone := p.ChangesByZone(zonePointerConverter(zones), changes)
+
+	for _, changes := range changesByZone {
+		for _, change := range changes {
+			switch change.Action {
+			case infobloxCreate:
+				// TODO:
+			case infobloxDelete:
+				// todo:
+			case infobloxUpdate:
+				// todo:
+			default:
+				return fmt.Errorf("unknown action '%s'", change.Action)
+			}
 		}
 	}
+	return nil
 }
 
 // ApplyChanges applies the given changes.
 func (p *ProviderConfig) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	combinedChanges := make([]*infobloxChangeMap, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
+	combinedChanges := make([]*infobloxChange, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
 
 	combinedChanges = append(combinedChanges, newIBChanges(infobloxCreate, changes.Create)...)
 	combinedChanges = append(combinedChanges, newIBChanges(infobloxUpdate, changes.UpdateNew)...)
@@ -497,33 +512,45 @@ func (p *ProviderConfig) zones() ([]ibclient.ZoneAuth, error) {
 	return result, nil
 }
 
-type infobloxChangeMap struct {
+type infobloxChange struct {
 	Action   string
 	Endpoint *endpoint.Endpoint
 }
 
-func ChangesByZone(zones []*ibclient.ZoneAuth, changeSets []*infobloxChangeMap) map[string][]*infobloxChangeMap {
-	changes := make(map[string][]*infobloxChangeMap{})
+func (p *ProviderConfig) ChangesByZone(zones []*ibclient.ZoneAuth, changeSets []*infobloxChange) map[string][]*infobloxChange {
+	changes := make(map[string][]*infobloxChange)
 	for _, z := range zones {
-		changes[z.Zone] = []*infobloxChangeMap{}
+		changes[z.Fqdn] = []*infobloxChange{}
 	}
+
 	for _, c := range changeSets {
-		zone, _ := p.findZone(zones, c.Endpoint.DNSName)
-		if zone == nil (
-			logrus.Debugf("Ignoring changes to '%s' because a suitable Infoblox DNS zone was not found.", change.DNSName)
-			continue	
-		)
-		changes[zone] = append(changes[zone], c)
+		zone := p.findZone(zones, c.Endpoint.DNSName)
+		if zone.Fqdn == "" {
+			log.Debugf(context.TODO(), "Skipping record %s because no hosted zone matching record DNS Name was detected", c.Endpoint.DNSName)
+			continue
+		}
+		changes[zone.Fqdn] = append(changes[zone.Fqdn], c)
+
+		if p.createPTR && c.Endpoint.RecordType == endpoint.RecordTypeA {
+			reverseZone := p.findReverseZone(zones, c.Endpoint.Targets[0])
+			if reverseZone == nil {
+				logrus.Debugf("Ignoring changes to '%s' because a suitable Infoblox DNS reverse zone was not found.", c.Endpoint.Targets)
+				continue
+			}
+			copyEp := *c.Endpoint
+			copyEp.RecordType = endpoint.RecordTypePTR
+			changes[reverseZone.Fqdn] = append(changes[reverseZone.Fqdn], &infobloxChange{c.Action, &copyEp})
+		}
 	}
 	return changes
 }
 
-func (p *ProviderConfig) findZone(zones []ibclient.ZoneAuth, name string) *ibclient.ZoneAuth {
+func (p *ProviderConfig) findZone(zones []*ibclient.ZoneAuth, name string) *ibclient.ZoneAuth {
 	var result *ibclient.ZoneAuth
 
 	// Go through every zone looking for the longest name (i.e. most specific) as a matching suffix
 	for idx := range zones {
-		zone := &zones[idx]
+		zone := zones[idx]
 		if strings.HasSuffix(name, "."+zone.Fqdn) {
 			if result == nil || len(zone.Fqdn) > len(result.Fqdn) {
 				result = zone
@@ -537,7 +564,7 @@ func (p *ProviderConfig) findZone(zones []ibclient.ZoneAuth, name string) *ibcli
 	return result
 }
 
-func (p *ProviderConfig) findReverseZone(zones []ibclient.ZoneAuth, name string) *ibclient.ZoneAuth {
+func (p *ProviderConfig) findReverseZone(zones []*ibclient.ZoneAuth, name string) *ibclient.ZoneAuth {
 	ip := net.ParseIP(name)
 	networks := map[int]*ibclient.ZoneAuth{}
 	maxMask := 0
@@ -549,7 +576,7 @@ func (p *ProviderConfig) findReverseZone(zones []ibclient.ZoneAuth, name string)
 		} else {
 			if rZoneNet.Contains(ip) {
 				_, mask := rZoneNet.Mask.Size()
-				networks[mask] = &zones[i]
+				networks[mask] = zones[i]
 				if mask > maxMask {
 					maxMask = mask
 				}
@@ -565,7 +592,8 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		var res []ibclient.RecordA
 		obj := ibclient.NewEmptyRecordA()
 		obj.Name = ep.DNSName
-		obj.Ipv4Addr = ep.Targets[targetIndex]
+		// TODO: get target index
+		obj.Ipv4Addr = ep.Targets[0]
 		obj.View = p.view
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
@@ -582,7 +610,8 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		var res []ibclient.RecordPTR
 		obj := ibclient.NewEmptyRecordPTR()
 		obj.PtrdName = ep.DNSName
-		obj.Ipv4Addr = ep.Targets[targetIndex]
+		// TODO: get target index
+		obj.Ipv4Addr = ep.Targets[0]
 		obj.View = p.view
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.PtrdName})
@@ -619,13 +648,11 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		if target, err2 := strconv.Unquote(ep.Targets[0]); err2 == nil && !strings.Contains(ep.Targets[0], " ") {
 			ep.Targets = endpoint.Targets{target}
 		}
-		obj := ibclient.NewRecordTXT(
-			ibclient.RecordTXT{
-				Name: ep.DNSName,
-				Text: ep.Targets[0],
-				View: p.view,
-			},
-		)
+		obj := ibclient.NewEmptyRecordTXT()
+		obj.View = p.view
+		obj.Text = ep.Targets[0]
+		obj.Name = ep.DNSName
+		// TODO: Zone?
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -641,20 +668,11 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 	return
 }
 
-func (p *ProviderConfig) buildRecord(zoneName string, change *infobloxChangeMap) (*infobloxRecordSet, error) {
+func (p *ProviderConfig) buildRecord(zoneName string, change *infobloxChange) (*infobloxRecordSet, error) {
 	rs, err := p.recordSet(change.Endpoint, false, ta)
 }
 
-func (p *ProviderConfig) submitChanges(changes infobloxChangeMap) error {
-	if len(changes) == 0 {
-		return nil
-	}
-
-}
-func (p *ProviderConfig) buildRecord(zone string, change infobloxChangeMap) interface{} {
-
-}
-func (p *ProviderConfig) createRecords(created infobloxChangeMap) {
+func (p *ProviderConfig) createRecords(created infobloxChange) {
 	for zone, endpoints := range created {
 		for _, ep := range endpoints {
 			for targetIndex := range ep.Targets {
@@ -706,7 +724,7 @@ func (p *ProviderConfig) createRecords(created infobloxChangeMap) {
 	}
 }
 
-func (p *ProviderConfig) deleteRecords(deleted infobloxChangeMap) {
+func (p *ProviderConfig) deleteRecords(deleted infobloxChange) {
 	// Delete records first
 	for zone, endpoints := range deleted {
 		for _, ep := range endpoints {
