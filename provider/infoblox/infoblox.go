@@ -243,7 +243,12 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 				}
 			}
 			if !foundExisting {
-				newEndpoint := endpoint.NewEndpoint(res.Name, endpoint.RecordTypeA, res.Ipv4Addr)
+				newEndpoint := endpoint.NewEndpointWithTTL(
+					res.Name,
+					endpoint.RecordTypeA,
+					endpoint.TTL(int(res.Ttl)),
+					res.Ipv4Addr,
+				)
 				if p.createPTR {
 					newEndpoint.WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
 				}
@@ -270,7 +275,12 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 
 				// host record is an abstraction in infoblox that combines A and PTR records
 				// for any host record we already should have a PTR record in infoblox, so mark it as created
-				newEndpoint := endpoint.NewEndpoint(res.Name, endpoint.RecordTypeA, ip.Ipv4Addr)
+				newEndpoint := endpoint.NewEndpointWithTTL(
+					res.Name,
+					endpoint.RecordTypeA,
+					endpoint.TTL(int(res.Ttl)),
+					ip.Ipv4Addr,
+				)
 				if p.createPTR {
 					newEndpoint.WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
 				}
@@ -288,7 +298,14 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 		}
 		for _, res := range resC {
 			logrus.Debugf("Record='%s' CNAME:'%s'", res.Name, res.Canonical)
-			endpoints = append(endpoints, endpoint.NewEndpoint(res.Name, endpoint.RecordTypeCNAME, res.Canonical))
+			endpoints = append(endpoints, endpoint.NewEndpointWithTTL(
+				res.Name,
+				endpoint.RecordTypeCNAME,
+				endpoint.TTL(int(res.Ttl)),
+				res.Canonical,
+			),
+			)
+
 		}
 
 		if p.createPTR {
@@ -306,7 +323,12 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 					return nil, fmt.Errorf("could not fetch PTR records from zone '%s': %w", zone.Fqdn, err)
 				}
 				for _, res := range resP {
-					endpoints = append(endpoints, endpoint.NewEndpoint(res.PtrdName, endpoint.RecordTypePTR, res.Ipv4Addr))
+					endpoints = append(endpoints, endpoint.NewEndpointWithTTL(res.PtrdName,
+						endpoint.RecordTypePTR,
+						endpoint.TTL(int(res.Ttl)),
+						res.Ipv4Addr,
+					),
+					)
 				}
 			}
 		}
@@ -351,7 +373,12 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 			}
 			if !foundExisting {
 				logrus.Debugf("Record='%s' TXT:'%s'", res.Name, res.Text)
-				newEndpoint := endpoint.NewEndpoint(res.Name, endpoint.RecordTypeTXT, res.Text)
+				newEndpoint := endpoint.NewEndpointWithTTL(
+					res.Name,
+					endpoint.RecordTypeTXT,
+					endpoint.TTL(int(res.Ttl)),
+					res.Text,
+				)
 				endpoints = append(endpoints, newEndpoint)
 			}
 		}
@@ -393,8 +420,10 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 
 func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
 	// Update user specified TTL (0 == disabled)
-	for i := range endpoints {
-		endpoints[i].RecordTTL = endpoint.TTL(p.cacheDuration)
+	for _, ep := range endpoints {
+		if !ep.RecordTTL.IsConfigured() {
+			ep.RecordTTL = endpoint.TTL(p.cacheDuration)
+		}
 	}
 
 	if !p.createPTR {
@@ -622,6 +651,10 @@ func (p *ProviderConfig) findReverseZone(zones []*ibclient.ZoneAuth, name string
 }
 
 func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recordSet infobloxRecordSet, err error) {
+	var ttl uint32
+	if ep.RecordTTL.IsConfigured() {
+		ttl = uint32(ep.RecordTTL)
+	}
 	switch ep.RecordType {
 	case endpoint.RecordTypeA:
 		var res []ibclient.RecordA
@@ -630,6 +663,7 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		// TODO: get target index
 		obj.Ipv4Addr = ep.Targets[0]
 		obj.View = p.view
+		obj.Ttl = ttl
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -648,6 +682,7 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		// TODO: get target index
 		obj.Ipv4Addr = ep.Targets[0]
 		obj.View = p.view
+		obj.Ttl = ttl
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.PtrdName})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -665,6 +700,7 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		obj.Name = ep.DNSName
 		obj.Canonical = ep.Targets[0]
 		obj.View = p.view
+		obj.Ttl = ttl
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -687,6 +723,7 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		obj.View = p.view
 		obj.Text = ep.Targets[0]
 		obj.Name = ep.DNSName
+		obj.Ttl = ttl
 		// TODO: Zone?
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
