@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -188,7 +189,7 @@ func NewInfobloxProvider(ibStartupCfg StartupConfig) (*ProviderConfig, error) {
 }
 
 // Records gets the current records.
-func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.Endpoint, err error) {
+func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpoint, err error) {
 	zones, err := p.zones()
 	if err != nil {
 		return nil, fmt.Errorf("could not fetch zones: %w", err)
@@ -391,14 +392,14 @@ func (p *ProviderConfig) Records(ctx context.Context) (endpoints []*endpoint.End
 	return endpoints, nil
 }
 
-func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endpoint.Endpoint {
+func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
 	// Update user specified TTL (0 == disabled)
 	for i := range endpoints {
 		endpoints[i].RecordTTL = endpoint.TTL(p.cacheDuration)
 	}
 
 	if !p.createPTR {
-		return endpoints
+		return endpoints, nil
 	}
 
 	// for all A records, we want to create PTR records
@@ -418,16 +419,16 @@ func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endp
 		}
 	}
 
-	return endpoints
+	return endpoints, nil
 }
 
-func newIBChanges(action string, endpoints []*endpoint.Endpoint) []*infobloxChange {
-	changes := make([]*infobloxChange, 0, len(endpoints))
+func newIBChanges(action string, eps []*endpoint.Endpoint) []*infobloxChange {
+	changes := make([]*infobloxChange, 0, len(eps))
 
-	for _, endpoint := range endpoints {
+	for _, ep := range eps {
 		changes = append(changes, &infobloxChange{
 			Action:   action,
-			Endpoint: endpoint,
+			Endpoint: ep,
 		},
 		)
 	}
@@ -456,26 +457,52 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 	}
 
 	changesByZone := p.ChangesByZone(zonePointerConverter(zones), changes)
-
 	for _, changes := range changesByZone {
 		for _, change := range changes {
+			record, err := p.buildRecord(change)
+			if err != nil {
+				return fmt.Errorf("could not build record: %w", err)
+			}
+			refId, err := getRefID(record.res)
+			if err != nil {
+				return err
+			}
+			// TODO: merge into one single object.
 			switch change.Action {
 			case infobloxCreate:
-				// TODO:
+				_, err = p.client.CreateObject(record.obj)
 			case infobloxDelete:
-				// todo:
+				// TODO: implement getRefID method
+				_, err = p.client.DeleteObject(refId)
 			case infobloxUpdate:
 				// todo:
+				_, err = p.client.UpdateObject(record.obj, refId)
 			default:
 				return fmt.Errorf("unknown action '%s'", change.Action)
 			}
 		}
 	}
+
 	return nil
 }
 
+func getRefID(v interface{}) (string, error) {
+	t := reflect.TypeOf(v).Elem().String()
+	switch t {
+	case "*ibclient.RecordA":
+		return v.(*ibclient.RecordA).Ref, nil
+	case "*ibclient.RecordTXT":
+		return v.(*ibclient.RecordTXT).Ref, nil
+	case "*ibclient.RecordCNAME":
+		return v.(*ibclient.RecordCNAME).Ref, nil
+	case "*ibclient.RecordPTR":
+		return v.(*ibclient.RecordPTR).Ref, nil
+	}
+	return "", fmt.Errorf("unknown type '%s'", t)
+}
+
 // ApplyChanges applies the given changes.
-func (p *ProviderConfig) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
+func (p *ProviderConfig) ApplyChanges(_ context.Context, changes *plan.Changes) error {
 	combinedChanges := make([]*infobloxChange, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
 
 	combinedChanges = append(combinedChanges, newIBChanges(infobloxCreate, changes.Create)...)
@@ -668,130 +695,12 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 	return
 }
 
-func (p *ProviderConfig) buildRecord(zoneName string, change *infobloxChange) (*infobloxRecordSet, error) {
-	rs, err := p.recordSet(change.Endpoint, false, ta)
-}
-
-func (p *ProviderConfig) createRecords(created infobloxChange) {
-	for zone, endpoints := range created {
-		for _, ep := range endpoints {
-			for targetIndex := range ep.Targets {
-				if p.dryRun {
-					logrus.Infof(
-
-						"Would create %s record named '%s' to '%s' for Infoblox DNS zone '%s'.",
-						ep.RecordType,
-						ep.DNSName,
-						ep.Targets[targetIndex],
-						zone,
-					)
-					continue
-				}
-
-				logrus.Infof(
-					"Creating %s record named '%s' to '%s' for Infoblox DNS zone '%s'.",
-					ep.RecordType,
-					ep.DNSName,
-					ep.Targets[targetIndex],
-					zone,
-				)
-
-				recordSet, err := p.recordSet(ep, false, targetIndex)
-				if err != nil && !isNotFoundError(err) {
-					logrus.Errorf(
-						"Failed to retrieve %s record named '%s' to '%s' for DNS zone '%s': %v",
-						ep.RecordType,
-						ep.DNSName,
-						ep.Targets[targetIndex],
-						zone,
-						err,
-					)
-					continue
-				}
-				_, err = p.client.CreateObject(recordSet.obj)
-				if err != nil {
-					logrus.Errorf(
-						"Failed to create %s record named '%s' to '%s' for DNS zone '%s': %v",
-						ep.RecordType,
-						ep.DNSName,
-						ep.Targets[targetIndex],
-						zone,
-						err,
-					)
-				}
-			}
-		}
+func (p *ProviderConfig) buildRecord(change *infobloxChange) (*infobloxRecordSet, error) {
+	rs, err := p.recordSet(change.Endpoint, !(change.Action == infobloxCreate))
+	if err != nil {
+		return nil, err
 	}
-}
-
-func (p *ProviderConfig) deleteRecords(deleted infobloxChange) {
-	// Delete records first
-	for zone, endpoints := range deleted {
-		for _, ep := range endpoints {
-			for targetIndex := range ep.Targets {
-				recordSet, err := p.recordSet(ep, true, targetIndex)
-				if err != nil && !isNotFoundError(err) {
-					logrus.Errorf(
-						"Failed to retrieve %s record named '%s' to '%s' for DNS zone '%s': %v",
-						ep.RecordType,
-						ep.DNSName,
-						ep.Targets[targetIndex],
-						zone,
-						err,
-					)
-					continue
-				}
-				switch ep.RecordType {
-				case endpoint.RecordTypeA:
-					for _, record := range *recordSet.res.(*[]ibclient.RecordA) {
-						if p.dryRun {
-							logrus.Infof("Would delete %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "A", record.Name, record.Ipv4Addr, record.Zone)
-						} else {
-							logrus.Infof("Deleting %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "A", record.Name, record.Ipv4Addr, record.Zone)
-							_, err = p.client.DeleteObject(record.Ref)
-						}
-					}
-				case endpoint.RecordTypePTR:
-					for _, record := range *recordSet.res.(*[]ibclient.RecordPTR) {
-						if p.dryRun {
-							logrus.Infof("Would delete %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "PTR", record.PtrdName, record.Ipv4Addr, record.Zone)
-						} else {
-							logrus.Infof("Deleting %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "PTR", record.PtrdName, record.Ipv4Addr, record.Zone)
-							_, err = p.client.DeleteObject(record.Ref)
-						}
-					}
-				case endpoint.RecordTypeCNAME:
-					for _, record := range *recordSet.res.(*[]ibclient.RecordCNAME) {
-						if p.dryRun {
-							logrus.Infof("Would delete %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "CNAME", record.Name, record.Canonical, record.Zone)
-						} else {
-							logrus.Infof("Deleting %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "CNAME", record.Name, record.Canonical, record.Zone)
-							_, err = p.client.DeleteObject(record.Ref)
-						}
-					}
-				case endpoint.RecordTypeTXT:
-					for _, record := range *recordSet.res.(*[]ibclient.RecordTXT) {
-						if p.dryRun {
-							logrus.Infof("Would delete %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "TXT", record.Name, record.Text, record.Zone)
-						} else {
-							logrus.Infof("Deleting %s record named '%s' to '%s' for Infoblox DNS zone '%s'.", "TXT", record.Name, record.Text, record.Zone)
-							_, err = p.client.DeleteObject(record.Ref)
-						}
-					}
-				}
-				if err != nil && !isNotFoundError(err) {
-					logrus.Errorf(
-						"Failed to delete %s record named '%s' to '%s' for Infoblox DNS zone '%s': %v",
-						ep.RecordType,
-						ep.DNSName,
-						ep.Targets[targetIndex],
-						zone,
-						err,
-					)
-				}
-			}
-		}
-	}
+	return &rs, nil
 }
 
 func lookupEnvAtoi(key string, fallback int) (i int) {

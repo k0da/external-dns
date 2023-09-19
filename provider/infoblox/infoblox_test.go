@@ -791,7 +791,8 @@ func TestInfobloxZones(t *testing.T) {
 	}
 
 	providerCfg := newInfobloxProvider(endpoint.NewDomainFilter([]string{"example.com", "1.2.3.0/24"}), provider.NewZoneIDFilter([]string{""}), "", true, false, &client)
-	zones, _ := providerCfg.zones()
+	zoneAuths, _ := providerCfg.zones()
+	zones := zonePointerConverter(zoneAuths)
 	var emptyZoneAuth *ibclient.ZoneAuth
 	assert.Equal(t, providerCfg.findZone(zones, "example.com").Fqdn, "example.com")
 	assert.Equal(t, providerCfg.findZone(zones, "nomatch-example.com"), emptyZoneAuth)
@@ -815,7 +816,8 @@ func TestInfobloxReverseZones(t *testing.T) {
 	}
 
 	providerCfg := newInfobloxProvider(endpoint.NewDomainFilter([]string{"example.com", "1.2.3.0/24", "10.0.0.0/8"}), provider.NewZoneIDFilter([]string{""}), "", true, false, &client)
-	zones, _ := providerCfg.zones()
+	zoneAuths, _ := providerCfg.zones()
+	zones := zonePointerConverter(zoneAuths)
 	var emptyZoneAuth *ibclient.ZoneAuth
 	assert.Equal(t, providerCfg.findReverseZone(zones, "nomatch-example.com"), emptyZoneAuth)
 	assert.Equal(t, providerCfg.findReverseZone(zones, "192.168.0.1"), emptyZoneAuth)
@@ -912,8 +914,8 @@ func TestGetObject(t *testing.T) {
 
 	providerConfig := newInfobloxProvider(endpoint.NewDomainFilter([]string{"mysite.com"}), provider.NewZoneIDFilter([]string{""}), "", true, true, client)
 
-	providerConfig.deleteRecords(infobloxChangeMap{
-		"myzone.com": []*endpoint.Endpoint{
+	providerConfig.ApplyChanges(context.TODO(), &plan.Changes{
+		Delete: []*endpoint.Endpoint{
 			endpoint.NewEndpoint("deletethisrecord.com", endpoint.RecordTypeA, "1.2.3.4"),
 		},
 	})
