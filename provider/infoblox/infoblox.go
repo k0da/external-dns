@@ -22,7 +22,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -312,10 +311,9 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 		}
 
 		var resT []ibclient.RecordTXT
-		objT := &ibclient.RecordTXT{
-			Zone: zone.Fqdn,
-			View: p.view,
-		}
+		objT := ibclient.NewEmptyRecordTXT()
+		objT.View = p.view
+		objT.Zone = zone.Fqdn
 		err = p.client.GetObject(objT, "", searchParams, &resT)
 		if err != nil && !isNotFoundError(err) {
 			return nil, fmt.Errorf("could not fetch TXT records from zone '%s': %w", zone.Fqdn, err)
@@ -463,7 +461,8 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 			if err != nil {
 				return fmt.Errorf("could not build record: %w", err)
 			}
-			refId, err := getRefID(record.res)
+			refId, err := getRefID(record.obj)
+			//logrus.Printf("AAAA %s\n", record.obj.ObjectType())
 			if err != nil {
 				return err
 			}
@@ -487,18 +486,18 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 }
 
 func getRefID(v interface{}) (string, error) {
-	t := reflect.TypeOf(v).Elem().String()
-	switch t {
-	case "*ibclient.RecordA":
+	typ := v.(*ibclient.IBBase).ObjectType()
+	switch typ {
+	case "record:a":
 		return v.(*ibclient.RecordA).Ref, nil
-	case "*ibclient.RecordTXT":
+	case "record:txt":
 		return v.(*ibclient.RecordTXT).Ref, nil
-	case "*ibclient.RecordCNAME":
+	case "record:cname":
 		return v.(*ibclient.RecordCNAME).Ref, nil
-	case "*ibclient.RecordPTR":
+	case "record:ptr":
 		return v.(*ibclient.RecordPTR).Ref, nil
 	}
-	return "", fmt.Errorf("unknown type '%s'", t)
+	return "", fmt.Errorf("unknown type '%s'", typ)
 }
 
 // ApplyChanges applies the given changes.
