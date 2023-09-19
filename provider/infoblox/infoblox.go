@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -461,8 +462,7 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 			if err != nil {
 				return fmt.Errorf("could not build record: %w", err)
 			}
-			refId, err := getRefID(record.obj)
-			//logrus.Printf("AAAA %s\n", record.obj.ObjectType())
+			refId, err := getRefID(record)
 			if err != nil {
 				return err
 			}
@@ -485,19 +485,28 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 	return nil
 }
 
-func getRefID(v interface{}) (string, error) {
-	typ := v.(*ibclient.IBBase).ObjectType()
-	switch typ {
-	case "record:a":
-		return v.(*ibclient.RecordA).Ref, nil
-	case "record:txt":
-		return v.(*ibclient.RecordTXT).Ref, nil
-	case "record:cname":
-		return v.(*ibclient.RecordCNAME).Ref, nil
-	case "record:ptr":
-		return v.(*ibclient.RecordPTR).Ref, nil
+func getRefID(record *infobloxRecordSet) (string, error) {
+
+	t := reflect.TypeOf(record.obj).Elem().Name()
+	switch t {
+	case "RecordA":
+		for _, r := range *record.res.(*[]ibclient.RecordA) {
+			return r.Ref, nil
+		}
+	case "RecordTXT":
+		for _, r := range *record.res.(*[]ibclient.RecordTXT) {
+			return r.Ref, nil
+		}
+	case "RecordCNAME":
+		for _, r := range *record.res.(*[]ibclient.RecordCNAME) {
+			return r.Ref, nil
+		}
+	case "RecordPTR":
+		for _, r := range *record.res.(*[]ibclient.RecordPTR) {
+			return r.Ref, nil
+		}
 	}
-	return "", fmt.Errorf("unknown type '%s'", typ)
+	return "", fmt.Errorf("unknown type '%s'", t)
 }
 
 // ApplyChanges applies the given changes.
