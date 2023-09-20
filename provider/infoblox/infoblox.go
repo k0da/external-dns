@@ -488,20 +488,15 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 	for _, changes := range changesByZone {
 		for _, change := range changes {
 			record, err := p.buildRecord(change)
-			logFields := log.Fields{
-				"record": record.obj.Name,
-				"type":   record.obj.TypeOf,
-				"ttl":    record.obj.Ttl,
-				"action": change.Action,
-			}
 			if err != nil {
 				return fmt.Errorf("could not build record: %w", err)
 			}
-			log.WithFields(logFields).Info("Changing record.")
-			refId, err := getRefID(record)
+			refId, logFields, err := getRefID(record)
 			if err != nil {
 				return err
 			}
+			logFields["action"] = change.Action
+			log.WithFields(logFields).Info("Changing record.")
 			// TODO: merge into one single object.
 			switch change.Action {
 			case infobloxCreate:
@@ -528,28 +523,42 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 	return nil
 }
 
-func getRefID(record *infobloxRecordSet) (string, error) {
-
+func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 	t := reflect.TypeOf(record.obj).Elem().Name()
+	l := log.Fields{
+		"type": t,
+	}
 	switch t {
 	case "RecordA":
+		l["record"] = record.obj.(*ibclient.RecordA).Name
+		l["ttl"] = record.obj.(*ibclient.RecordA).Ttl
 		for _, r := range *record.res.(*[]ibclient.RecordA) {
-			return r.Ref, nil
+			return r.Ref, l, nil
 		}
+		return "", l, nil
 	case "RecordTXT":
+		l["record"] = record.obj.(*ibclient.RecordTXT).Name
+		l["ttl"] = record.obj.(*ibclient.RecordTXT).Ttl
 		for _, r := range *record.res.(*[]ibclient.RecordTXT) {
-			return r.Ref, nil
+			return r.Ref, l, nil
 		}
+		return "", l, nil
 	case "RecordCNAME":
+		l["record"] = record.obj.(*ibclient.RecordCNAME).Name
+		l["ttl"] = record.obj.(*ibclient.RecordCNAME).Ttl
 		for _, r := range *record.res.(*[]ibclient.RecordCNAME) {
-			return r.Ref, nil
+			return r.Ref, l, nil
 		}
+		return "", l, nil
 	case "RecordPTR":
+		l["record"] = record.obj.(*ibclient.RecordPTR).Name
+		l["ttl"] = record.obj.(*ibclient.RecordPTR).Ttl
 		for _, r := range *record.res.(*[]ibclient.RecordPTR) {
-			return r.Ref, nil
+			return r.Ref, l, nil
 		}
+		return "", l, nil
 	}
-	return "", fmt.Errorf("unknown type '%s'", t)
+	return "", l, fmt.Errorf("unknown type '%s'", t)
 }
 
 // ApplyChanges applies the given changes.
@@ -604,7 +613,7 @@ func (p *ProviderConfig) ChangesByZone(zones []*ibclient.ZoneAuth, changeSets []
 	for _, c := range changeSets {
 		zone := p.findZone(zones, c.Endpoint.DNSName)
 		if zone.Fqdn == "" {
-			log.Debugf(context.TODO(), "Skipping record %s because no hosted zone matching record DNS Name was detected", c.Endpoint.DNSName)
+			log.Debugf("Skipping record %s because no hosted zone matching record DNS Name was detected", c.Endpoint.DNSName)
 			continue
 		}
 		changes[zone.Fqdn] = append(changes[zone.Fqdn], c)
@@ -676,8 +685,8 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		obj.Name = ep.DNSName
 		// TODO: get target index
 		obj.Ipv4Addr = ep.Targets[0]
-		obj.View = p.view
 		obj.Ttl = ttl
+		obj.UseTtl = true
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -695,8 +704,8 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		obj.PtrdName = ep.DNSName
 		// TODO: get target index
 		obj.Ipv4Addr = ep.Targets[0]
-		obj.View = p.view
 		obj.Ttl = ttl
+		obj.UseTtl = true
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.PtrdName})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -713,8 +722,8 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		obj := ibclient.NewEmptyRecordCNAME()
 		obj.Name = ep.DNSName
 		obj.Canonical = ep.Targets[0]
-		obj.View = p.view
 		obj.Ttl = ttl
+		obj.UseTtl = true
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
 			err = p.client.GetObject(obj, "", queryParams, &res)
@@ -734,10 +743,10 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 			ep.Targets = endpoint.Targets{target}
 		}
 		obj := ibclient.NewEmptyRecordTXT()
-		obj.View = p.view
 		obj.Text = ep.Targets[0]
 		obj.Name = ep.DNSName
 		obj.Ttl = ttl
+		obj.UseTtl = true
 		// TODO: Zone?
 		if getObject {
 			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
