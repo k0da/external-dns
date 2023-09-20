@@ -452,13 +452,15 @@ func (p *ProviderConfig) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*end
 
 func newIBChanges(action string, eps []*endpoint.Endpoint) []*infobloxChange {
 	changes := make([]*infobloxChange, 0, len(eps))
-
 	for _, ep := range eps {
-		changes = append(changes, &infobloxChange{
-			Action:   action,
-			Endpoint: ep,
-		},
-		)
+		for _, target := range ep.Targets {
+			newEp := ep.DeepCopy()
+			newEp.Targets = endpoint.Targets{target}
+			changes = append(changes, &infobloxChange{
+				Action:   action,
+				Endpoint: newEp,
+			})
+		}
 	}
 
 	return changes
@@ -497,7 +499,6 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 			}
 			logFields["action"] = change.Action
 			log.WithFields(logFields).Info("Changing record.")
-			// TODO: merge into one single object.
 			switch change.Action {
 			case infobloxCreate:
 				_, err = p.client.CreateObject(record.obj)
@@ -532,6 +533,7 @@ func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 	case "RecordA":
 		l["record"] = record.obj.(*ibclient.RecordA).Name
 		l["ttl"] = record.obj.(*ibclient.RecordA).Ttl
+		l["target"] = record.obj.(*ibclient.RecordA).Ipv4Addr
 		for _, r := range *record.res.(*[]ibclient.RecordA) {
 			return r.Ref, l, nil
 		}
@@ -539,6 +541,7 @@ func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 	case "RecordTXT":
 		l["record"] = record.obj.(*ibclient.RecordTXT).Name
 		l["ttl"] = record.obj.(*ibclient.RecordTXT).Ttl
+		l["target"] = record.obj.(*ibclient.RecordTXT).Text
 		for _, r := range *record.res.(*[]ibclient.RecordTXT) {
 			return r.Ref, l, nil
 		}
@@ -546,6 +549,7 @@ func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 	case "RecordCNAME":
 		l["record"] = record.obj.(*ibclient.RecordCNAME).Name
 		l["ttl"] = record.obj.(*ibclient.RecordCNAME).Ttl
+		l["target"] = record.obj.(*ibclient.RecordCNAME).Canonical
 		for _, r := range *record.res.(*[]ibclient.RecordCNAME) {
 			return r.Ref, l, nil
 		}
@@ -553,6 +557,7 @@ func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 	case "RecordPTR":
 		l["record"] = record.obj.(*ibclient.RecordPTR).Name
 		l["ttl"] = record.obj.(*ibclient.RecordPTR).Ttl
+		l["target"] = record.obj.(*ibclient.RecordPTR).PtrdName
 		for _, r := range *record.res.(*[]ibclient.RecordPTR) {
 			return r.Ref, l, nil
 		}
@@ -563,6 +568,33 @@ func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 
 // ApplyChanges applies the given changes.
 func (p *ProviderConfig) ApplyChanges(_ context.Context, changes *plan.Changes) error {
+
+	_ = func(changes *plan.Changes) []*endpoint.Endpoint {
+		mUpdateOldTargets := map[string]bool{}
+		mUpdateNewTargets := map[string]bool{}
+		deleteDiffEp := &endpoint.Endpoint{}
+
+		for _, ep := range changes.UpdateNew {
+			for _, target := range ep.Targets {
+				mUpdateNewTargets[target] = true
+			}
+		}
+
+		for _, ep := range changes.UpdateOld {
+			for _, target := range ep.Targets {
+				mUpdateOldTargets[target] = true
+			}
+		}
+
+		for target, _ := range mUpdateOldTargets {
+			if !mUpdateNewTargets[target] {
+				deleteDiffEp.Targets = append(deleteDiffEp.Targets, target)
+			}
+		}
+
+		return []*endpoint.Endpoint{deleteDiffEp}
+	}
+
 	combinedChanges := make([]*infobloxChange, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
 
 	combinedChanges = append(combinedChanges, newIBChanges(infobloxCreate, changes.Create)...)
