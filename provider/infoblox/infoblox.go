@@ -566,34 +566,81 @@ func getRefID(record *infobloxRecordSet) (string, log.Fields, error) {
 	return "", l, fmt.Errorf("unknown type '%s'", t)
 }
 
+// if updateNew is not part of Update Old , object should be created
+// if updateOld is not part of Update New , object should be deleted
+// if it is not there (TTL might change) , object should be updated
+// if we rename the object , object should be deleted and created
+func (p *ProviderConfig) CountDiff(changes *plan.Changes) {
+
+	endpointsToMap := func(eps []*endpoint.Endpoint) map[string]*endpoint.Endpoint {
+		m := map[string]*endpoint.Endpoint{}
+		for _, v := range eps {
+			m[v.DNSName+"_"+v.RecordType] = v
+		}
+		return m
+	}
+
+	targetsToMap := func(targets endpoint.Targets) map[string]bool {
+		m := map[string]bool{}
+		for _, v := range targets {
+			m[v] = true
+		}
+		return m
+	}
+
+	cloneWithSingleTarget := func(ep *endpoint.Endpoint, target string) *endpoint.Endpoint {
+		clone := ep.DeepCopy()
+		clone.Targets = endpoint.Targets{target}
+		return clone
+	}
+
+	removeTargetFromEndpoint := func(ep *endpoint.Endpoint, target string) {
+		for i, t := range ep.Targets {
+			if t == target {
+				ep.Targets = append(ep.Targets[:i], ep.Targets[i+1:]...)
+				break
+			}
+		}
+	}
+
+	updateNewMap := endpointsToMap(changes.UpdateNew)
+	updateOldMap := endpointsToMap(changes.UpdateOld)
+
+	// TODO: consider if old and new can be different. If yes, then we need to handle that case
+	for k, newEp := range updateNewMap {
+		oldEp := updateOldMap[k]
+		oldTargets := targetsToMap(oldEp.Targets)
+		newTargets := targetsToMap(newEp.Targets)
+
+		for target, _ := range oldTargets {
+			if !newTargets[target] {
+				// delete
+				changes.Delete = append(changes.Delete, cloneWithSingleTarget(oldEp, target))
+				removeTargetFromEndpoint(newEp, target)
+			}
+		}
+
+		for target, _ := range newTargets {
+			if !oldTargets[target] {
+				// create
+				changes.Create = append(changes.Create, cloneWithSingleTarget(newEp, target))
+				removeTargetFromEndpoint(newEp, target)
+			}
+		}
+
+		//for target, _ := range newTargets {
+		//	if oldTargets[target] {
+		//		// update
+		//		changes.UpdateNew = append(changes.UpdateNew, cloneWithSingleTarget(newEp, target))
+		//	}
+		//}
+	}
+}
+
 // ApplyChanges applies the given changes.
 func (p *ProviderConfig) ApplyChanges(_ context.Context, changes *plan.Changes) error {
 
-	_ = func(changes *plan.Changes) []*endpoint.Endpoint {
-		mUpdateOldTargets := map[string]bool{}
-		mUpdateNewTargets := map[string]bool{}
-		deleteDiffEp := &endpoint.Endpoint{}
-
-		for _, ep := range changes.UpdateNew {
-			for _, target := range ep.Targets {
-				mUpdateNewTargets[target] = true
-			}
-		}
-
-		for _, ep := range changes.UpdateOld {
-			for _, target := range ep.Targets {
-				mUpdateOldTargets[target] = true
-			}
-		}
-
-		for target, _ := range mUpdateOldTargets {
-			if !mUpdateNewTargets[target] {
-				deleteDiffEp.Targets = append(deleteDiffEp.Targets, target)
-			}
-		}
-
-		return []*endpoint.Endpoint{deleteDiffEp}
-	}
+	p.CountDiff(changes)
 
 	combinedChanges := make([]*infobloxChange, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
 
@@ -720,9 +767,10 @@ func (p *ProviderConfig) recordSet(ep *endpoint.Endpoint, getObject bool) (recor
 		obj.Ttl = ttl
 		obj.UseTtl = true
 		if getObject {
-			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name})
+			queryParams := ibclient.NewQueryParams(false, map[string]string{"name": obj.Name, "ipv4addr": obj.Ipv4Addr})
 			err = p.client.GetObject(obj, "", queryParams, &res)
 			if err != nil && !isNotFoundError(err) {
+				err = fmt.Errorf("could not fetch A record ['%s':'%s'] : %w", obj.Name, obj.Ipv4Addr, err)
 				return
 			}
 		}
