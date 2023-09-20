@@ -30,7 +30,7 @@ import (
 	"github.com/StackExchange/dnscontrol/v3/pkg/transform"
 	ibclient "github.com/infobloxopen/infoblox-go-client/v2"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/appengine/log"
+	log "github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
@@ -196,7 +196,7 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 	}
 
 	for _, zone := range zones {
-		logrus.Debugf("fetch records from zone '%s'", zone.Fqdn)
+		log.Debugf("fetch records from zone '%s'", zone.Fqdn)
 
 		view := p.view
 		if view == "" {
@@ -234,9 +234,9 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 					}
 
 					if duplicateTarget {
-						logrus.Debugf("A duplicate target '%s' found for existing A record '%s'", res.Ipv4Addr, ep.DNSName)
+						log.Debugf("A duplicate target '%s' found for existing A record '%s'", res.Ipv4Addr, ep.DNSName)
 					} else {
-						logrus.Debugf("Adding target '%s' to existing A record '%s'", res.Ipv4Addr, res.Name)
+						log.Debugf("Adding target '%s' to existing A record '%s'", res.Ipv4Addr, res.Name)
 						ep.Targets = append(ep.Targets, res.Ipv4Addr)
 					}
 					break
@@ -271,7 +271,7 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 		}
 		for _, res := range resH {
 			for _, ip := range res.Ipv4Addrs {
-				logrus.Debugf("Record='%s' A(H):'%s'", res.Name, ip.Ipv4Addr)
+				log.Debugf("Record='%s' A(H):'%s'", res.Name, ip.Ipv4Addr)
 
 				// host record is an abstraction in infoblox that combines A and PTR records
 				// for any host record we already should have a PTR record in infoblox, so mark it as created
@@ -297,7 +297,7 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 			return nil, fmt.Errorf("could not fetch CNAME records from zone '%s': %w", zone.Fqdn, err)
 		}
 		for _, res := range resC {
-			logrus.Debugf("Record='%s' CNAME:'%s'", res.Name, res.Canonical)
+			log.Debugf("Record='%s' CNAME:'%s'", res.Name, res.Canonical)
 			endpoints = append(endpoints, endpoint.NewEndpointWithTTL(
 				res.Name,
 				endpoint.RecordTypeCNAME,
@@ -363,16 +363,16 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 					}
 
 					if duplicateTarget {
-						logrus.Debugf("A duplicate target '%s' found for existing TXT record '%s'", res.Text, ep.DNSName)
+						log.Debugf("A duplicate target '%s' found for existing TXT record '%s'", res.Text, ep.DNSName)
 					} else {
-						logrus.Debugf("Adding target '%s' to existing TXT record '%s'", res.Text, res.Name)
+						log.Debugf("Adding target '%s' to existing TXT record '%s'", res.Text, res.Name)
 						ep.Targets = append(ep.Targets, res.Text)
 					}
 					break
 				}
 			}
 			if !foundExisting {
-				logrus.Debugf("Record='%s' TXT:'%s'", res.Name, res.Text)
+				log.Debugf("Record='%s' TXT:'%s'", res.Name, res.Text)
 				newEndpoint := endpoint.NewEndpointWithTTL(
 					res.Name,
 					endpoint.RecordTypeTXT,
@@ -414,7 +414,7 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 			}
 		}
 	}
-	logrus.Debugf("fetched %d records from infoblox", len(endpoints))
+	log.Debugf("fetched %d records from infoblox", len(endpoints))
 	return endpoints, nil
 }
 
@@ -488,9 +488,16 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 	for _, changes := range changesByZone {
 		for _, change := range changes {
 			record, err := p.buildRecord(change)
+			logFields := log.Fields{
+				"record": record.obj.Name,
+				"type":   record.obj.TypeOf,
+				"ttl":    record.obj.Ttl,
+				"action": change.Action,
+			}
 			if err != nil {
 				return fmt.Errorf("could not build record: %w", err)
 			}
+			log.WithFields(logFields).Info("Changing record.")
 			refId, err := getRefID(record)
 			if err != nil {
 				return err
@@ -499,12 +506,19 @@ func (p *ProviderConfig) submitChanges(changes []*infobloxChange) error {
 			switch change.Action {
 			case infobloxCreate:
 				_, err = p.client.CreateObject(record.obj)
+				if err != nil {
+					return err
+				}
 			case infobloxDelete:
-				// TODO: implement getRefID method
 				_, err = p.client.DeleteObject(refId)
+				if err != nil {
+					return err
+				}
 			case infobloxUpdate:
-				// todo:
 				_, err = p.client.UpdateObject(record.obj, refId)
+				if err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("unknown action '%s'", change.Action)
 			}
