@@ -23,11 +23,9 @@ import (
 	"net/http"
 	"os"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/StackExchange/dnscontrol/v3/pkg/transform"
 	ibclient "github.com/infobloxopen/infoblox-go-client/v2"
 	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
@@ -219,119 +217,126 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 			return nil, fmt.Errorf("could not fetch A records from zone '%s': %w", zone.Fqdn, err)
 		}
 		for _, res := range resA {
+			newEndpoint := endpoint.NewEndpointWithTTL(
+				res.Name,
+				endpoint.RecordTypeA,
+				endpoint.TTL(int(res.Ttl)),
+				res.Ipv4Addr,
+			)
+			endpoints = append(endpoints, newEndpoint)
 			// Check if endpoint already exists and add to existing endpoint if it does
-			foundExisting := false
-			for _, ep := range endpoints {
-				if ep.DNSName == res.Name && ep.RecordType == endpoint.RecordTypeA {
-					foundExisting = true
-					duplicateTarget := false
-
-					for _, t := range ep.Targets {
-						if t == res.Ipv4Addr {
-							duplicateTarget = true
-							break
-						}
-					}
-
-					if duplicateTarget {
-						log.Debugf("A duplicate target '%s' found for existing A record '%s'", res.Ipv4Addr, ep.DNSName)
-					} else {
-						log.Debugf("Adding target '%s' to existing A record '%s'", res.Ipv4Addr, res.Name)
-						ep.Targets = append(ep.Targets, res.Ipv4Addr)
-					}
-					break
-				}
-			}
-			if !foundExisting {
-				newEndpoint := endpoint.NewEndpointWithTTL(
-					res.Name,
-					endpoint.RecordTypeA,
-					endpoint.TTL(int(res.Ttl)),
-					res.Ipv4Addr,
-				)
-				if p.createPTR {
-					newEndpoint.WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
-				}
-				endpoints = append(endpoints, newEndpoint)
-			}
+			//foundExisting := false
+			//for _, ep := range endpoints {
+			//	if ep.DNSName == res.Name && ep.RecordType == endpoint.RecordTypeA {
+			//		foundExisting = true
+			//		duplicateTarget := false
+			//
+			//		for _, t := range ep.Targets {
+			//			if t == res.Ipv4Addr {
+			//				duplicateTarget = true
+			//				break
+			//			}
+			//		}
+			//
+			//		if duplicateTarget {
+			//			log.Debugf("A duplicate target '%s' found for existing A record '%s'", res.Ipv4Addr, ep.DNSName)
+			//		} else {
+			//			log.Debugf("Adding target '%s' to existing A record '%s'", res.Ipv4Addr, res.Name)
+			//			ep.Targets = append(ep.Targets, res.Ipv4Addr)
+			//		}
+			//		break
+			//	}
+			//}
+			//if !foundExisting {
+			//	newEndpoint := endpoint.NewEndpointWithTTL(
+			//		res.Name,
+			//		endpoint.RecordTypeA,
+			//		endpoint.TTL(int(res.Ttl)),
+			//		res.Ipv4Addr,
+			//	)
+			//	if p.createPTR {
+			//		newEndpoint.WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
+			//	}
+			//	endpoints = append(endpoints, newEndpoint)
+			//}
 		}
 		// sort targets so that they are always in same order, as infoblox might return them in different order
-		for _, ep := range endpoints {
-			sort.Sort(ep.Targets)
-		}
+		//for _, ep := range endpoints {
+		//	sort.Sort(ep.Targets)
+		//}
 
 		// Include Host records since they should be treated synonymously with A records
-		var resH []ibclient.HostRecord
-		objH := ibclient.NewEmptyHostRecord()
-		objH.View = p.view
-		objH.Zone = zone.Fqdn
-		err = p.client.GetObject(objH, "", searchParams, &resH)
-		if err != nil && !isNotFoundError(err) {
-			return nil, fmt.Errorf("could not fetch host records from zone '%s': %w", zone.Fqdn, err)
-		}
-		for _, res := range resH {
-			for _, ip := range res.Ipv4Addrs {
-				log.Debugf("Record='%s' A(H):'%s'", res.Name, ip.Ipv4Addr)
+		//var resH []ibclient.HostRecord
+		//objH := ibclient.NewEmptyHostRecord()
+		//objH.View = p.view
+		//objH.Zone = zone.Fqdn
+		//err = p.client.GetObject(objH, "", searchParams, &resH)
+		//if err != nil && !isNotFoundError(err) {
+		//	return nil, fmt.Errorf("could not fetch host records from zone '%s': %w", zone.Fqdn, err)
+		//}
+		//for _, res := range resH {
+		//	for _, ip := range res.Ipv4Addrs {
+		//		log.Debugf("Record='%s' A(H):'%s'", res.Name, ip.Ipv4Addr)
+		//
+		//		// host record is an abstraction in infoblox that combines A and PTR records
+		//		// for any host record we already should have a PTR record in infoblox, so mark it as created
+		//		newEndpoint := endpoint.NewEndpointWithTTL(
+		//			res.Name,
+		//			endpoint.RecordTypeA,
+		//			endpoint.TTL(int(res.Ttl)),
+		//			ip.Ipv4Addr,
+		//		)
+		//		if p.createPTR {
+		//			newEndpoint.WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
+		//		}
+		//		endpoints = append(endpoints, newEndpoint)
+		//	}
+		//}
 
-				// host record is an abstraction in infoblox that combines A and PTR records
-				// for any host record we already should have a PTR record in infoblox, so mark it as created
-				newEndpoint := endpoint.NewEndpointWithTTL(
-					res.Name,
-					endpoint.RecordTypeA,
-					endpoint.TTL(int(res.Ttl)),
-					ip.Ipv4Addr,
-				)
-				if p.createPTR {
-					newEndpoint.WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
-				}
-				endpoints = append(endpoints, newEndpoint)
-			}
-		}
+		//var resC []ibclient.RecordCNAME
+		//objC := ibclient.NewEmptyRecordCNAME()
+		//objC.View = p.view
+		//objC.Zone = zone.Fqdn
+		//err = p.client.GetObject(objC, "", searchParams, &resC)
+		//if err != nil && !isNotFoundError(err) {
+		//	return nil, fmt.Errorf("could not fetch CNAME records from zone '%s': %w", zone.Fqdn, err)
+		//}
+		//for _, res := range resC {
+		//	log.Debugf("Record='%s' CNAME:'%s'", res.Name, res.Canonical)
+		//	endpoints = append(endpoints, endpoint.NewEndpointWithTTL(
+		//		res.Name,
+		//		endpoint.RecordTypeCNAME,
+		//		endpoint.TTL(int(res.Ttl)),
+		//		res.Canonical,
+		//	),
+		//	)
+		//
+		//}
 
-		var resC []ibclient.RecordCNAME
-		objC := ibclient.NewEmptyRecordCNAME()
-		objC.View = p.view
-		objC.Zone = zone.Fqdn
-		err = p.client.GetObject(objC, "", searchParams, &resC)
-		if err != nil && !isNotFoundError(err) {
-			return nil, fmt.Errorf("could not fetch CNAME records from zone '%s': %w", zone.Fqdn, err)
-		}
-		for _, res := range resC {
-			log.Debugf("Record='%s' CNAME:'%s'", res.Name, res.Canonical)
-			endpoints = append(endpoints, endpoint.NewEndpointWithTTL(
-				res.Name,
-				endpoint.RecordTypeCNAME,
-				endpoint.TTL(int(res.Ttl)),
-				res.Canonical,
-			),
-			)
-
-		}
-
-		if p.createPTR {
-			// infoblox doesn't accept reverse zone's fqdn, and instead expects .in-addr.arpa zone
-			// so convert our zone fqdn (if it is a correct cidr block) into in-addr.arpa address and pass that into infoblox
-			// example: 10.196.38.0/24 becomes 38.196.10.in-addr.arpa
-			arpaZone, err := transform.ReverseDomainName(zone.Fqdn)
-			if err == nil {
-				var resP []ibclient.RecordPTR
-				objP := ibclient.NewEmptyRecordPTR()
-				objP.Zone = arpaZone
-				objP.View = p.view
-				err = p.client.GetObject(objP, "", searchParams, &resP)
-				if err != nil && !isNotFoundError(err) {
-					return nil, fmt.Errorf("could not fetch PTR records from zone '%s': %w", zone.Fqdn, err)
-				}
-				for _, res := range resP {
-					endpoints = append(endpoints, endpoint.NewEndpointWithTTL(res.PtrdName,
-						endpoint.RecordTypePTR,
-						endpoint.TTL(int(res.Ttl)),
-						res.Ipv4Addr,
-					),
-					)
-				}
-			}
-		}
+		//if p.createPTR {
+		//	// infoblox doesn't accept reverse zone's fqdn, and instead expects .in-addr.arpa zone
+		//	// so convert our zone fqdn (if it is a correct cidr block) into in-addr.arpa address and pass that into infoblox
+		//	// example: 10.196.38.0/24 becomes 38.196.10.in-addr.arpa
+		//	arpaZone, err := transform.ReverseDomainName(zone.Fqdn)
+		//	if err == nil {
+		//		var resP []ibclient.RecordPTR
+		//		objP := ibclient.NewEmptyRecordPTR()
+		//		objP.Zone = arpaZone
+		//		objP.View = p.view
+		//		err = p.client.GetObject(objP, "", searchParams, &resP)
+		//		if err != nil && !isNotFoundError(err) {
+		//			return nil, fmt.Errorf("could not fetch PTR records from zone '%s': %w", zone.Fqdn, err)
+		//		}
+		//		for _, res := range resP {
+		//			endpoints = append(endpoints, endpoint.NewEndpointWithTTL(res.PtrdName,
+		//				endpoint.RecordTypePTR,
+		//				endpoint.TTL(int(res.Ttl)),
+		//				res.Ipv4Addr,
+		//			),
+		//			)
+		//		}
+		//	}
+		//}
 
 		var resT []ibclient.RecordTXT
 		objT := ibclient.NewEmptyRecordTXT()
@@ -348,72 +353,80 @@ func (p *ProviderConfig) Records(_ context.Context) (endpoints []*endpoint.Endpo
 				res.Text = strconv.Quote(res.Text)
 			}
 
-			foundExisting := false
+			newEndpoint := endpoint.NewEndpointWithTTL(
+				res.Name,
+				endpoint.RecordTypeTXT,
+				endpoint.TTL(int(res.Ttl)),
+				res.Text,
+			)
+			endpoints = append(endpoints, newEndpoint)
 
-			for _, ep := range endpoints {
-				if ep.DNSName == res.Name && ep.RecordType == endpoint.RecordTypeTXT {
-					foundExisting = true
-					duplicateTarget := false
-
-					for _, t := range ep.Targets {
-						if t == res.Text {
-							duplicateTarget = true
-							break
-						}
-					}
-
-					if duplicateTarget {
-						log.Debugf("A duplicate target '%s' found for existing TXT record '%s'", res.Text, ep.DNSName)
-					} else {
-						log.Debugf("Adding target '%s' to existing TXT record '%s'", res.Text, res.Name)
-						ep.Targets = append(ep.Targets, res.Text)
-					}
-					break
-				}
-			}
-			if !foundExisting {
-				log.Debugf("Record='%s' TXT:'%s'", res.Name, res.Text)
-				newEndpoint := endpoint.NewEndpointWithTTL(
-					res.Name,
-					endpoint.RecordTypeTXT,
-					endpoint.TTL(int(res.Ttl)),
-					res.Text,
-				)
-				endpoints = append(endpoints, newEndpoint)
-			}
+			//foundExisting := false
+			//
+			//for _, ep := range endpoints {
+			//	if ep.DNSName == res.Name && ep.RecordType == endpoint.RecordTypeTXT {
+			//		foundExisting = true
+			//		duplicateTarget := false
+			//
+			//		for _, t := range ep.Targets {
+			//			if t == res.Text {
+			//				duplicateTarget = true
+			//				break
+			//			}
+			//		}
+			//
+			//		if duplicateTarget {
+			//			log.Debugf("A duplicate target '%s' found for existing TXT record '%s'", res.Text, ep.DNSName)
+			//		} else {
+			//			log.Debugf("Adding target '%s' to existing TXT record '%s'", res.Text, res.Name)
+			//			ep.Targets = append(ep.Targets, res.Text)
+			//		}
+			//		break
+			//	}
+			//}
+			//if !foundExisting {
+			//	log.Debugf("Record='%s' TXT:'%s'", res.Name, res.Text)
+			//	newEndpoint := endpoint.NewEndpointWithTTL(
+			//		res.Name,
+			//		endpoint.RecordTypeTXT,
+			//		endpoint.TTL(int(res.Ttl)),
+			//		res.Text,
+			//	)
+			//	endpoints = append(endpoints, newEndpoint)
+			//}
 		}
 	}
 
 	// update A records that have PTR record created for them already
-	if p.createPTR {
-		// save all ptr records into map for a quick look up
-		ptrRecordsMap := make(map[string]bool)
-		for _, ptrRecord := range endpoints {
-			if ptrRecord.RecordType != endpoint.RecordTypePTR {
-				continue
-			}
-			ptrRecordsMap[ptrRecord.DNSName] = true
-		}
-
-		for i := range endpoints {
-			if endpoints[i].RecordType != endpoint.RecordTypeA {
-				continue
-			}
-			// if PTR record already exists for A record, then mark it as such
-			if ptrRecordsMap[endpoints[i].DNSName] {
-				found := false
-				for j := range endpoints[i].ProviderSpecific {
-					if endpoints[i].ProviderSpecific[j].Name == providerSpecificInfobloxPtrRecord {
-						endpoints[i].ProviderSpecific[j].Value = "true"
-						found = true
-					}
-				}
-				if !found {
-					endpoints[i].WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
-				}
-			}
-		}
-	}
+	//if p.createPTR {
+	//	// save all ptr records into map for a quick look up
+	//	ptrRecordsMap := make(map[string]bool)
+	//	for _, ptrRecord := range endpoints {
+	//		if ptrRecord.RecordType != endpoint.RecordTypePTR {
+	//			continue
+	//		}
+	//		ptrRecordsMap[ptrRecord.DNSName] = true
+	//	}
+	//
+	//	for i := range endpoints {
+	//		if endpoints[i].RecordType != endpoint.RecordTypeA {
+	//			continue
+	//		}
+	//		// if PTR record already exists for A record, then mark it as such
+	//		if ptrRecordsMap[endpoints[i].DNSName] {
+	//			found := false
+	//			for j := range endpoints[i].ProviderSpecific {
+	//				if endpoints[i].ProviderSpecific[j].Name == providerSpecificInfobloxPtrRecord {
+	//					endpoints[i].ProviderSpecific[j].Value = "true"
+	//					found = true
+	//				}
+	//			}
+	//			if !found {
+	//				endpoints[i].WithProviderSpecific(providerSpecificInfobloxPtrRecord, "true")
+	//			}
+	//		}
+	//	}
+	//}
 	log.Debugf("fetched %d records from infoblox", len(endpoints))
 	return endpoints, nil
 }
